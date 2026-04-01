@@ -142,9 +142,9 @@ function autoRedeemCDKs() {
   for (let i = 0; i < newCDKs.length; i++) {
     const cdk = newCDKs[i].code;
 
-    // Final check against storage for robustness
-     if (getPreviouslyRedeemedAndFailedCDKs().has(cdk)) {
-         Logger.log(`Skipping CDK ${cdk} as it was found in storage just before attempting.`);
+    // Final check against in-memory set for robustness
+     if (previouslyAttemptedSet.has(cdk)) {
+         Logger.log(`Skipping CDK ${cdk} as it was found in attempted set just before attempting.`);
          continue;
      }
 
@@ -158,10 +158,12 @@ function autoRedeemCDKs() {
       // Store successful redemptions
       if (result.success) {
         storeRedeemedCDK(cdk);
+        previouslyAttemptedSet.add(cdk);
       }
       // Store failures with permanent error codes
       else if (result.errorCode && PERMANENT_ERROR_CODES.has(result.errorCode)) {
            storePermanentlyFailedCDK(cdk);
+           previouslyAttemptedSet.add(cdk);
            Logger.log(`Marking CDK ${cdk} as permanently failed due to ErrorCode: ${result.errorCode}`);
       }
       // Other failures are not marked permanent and may be retried later
@@ -313,19 +315,51 @@ function redeemCDK(cdk, userId) {
 
 
 /**
+ * Helper to get a stored array from PropertiesService.
+ */
+function getStoredArray(propertyKey) {
+  const properties = PropertiesService.getUserProperties();
+  const storedString = properties.getProperty(propertyKey);
+  let storedArray = [];
+  if (storedString) {
+    try {
+      storedArray = JSON.parse(storedString);
+      if (!Array.isArray(storedArray)) storedArray = [];
+    } catch (e) {
+      Logger.log(`Error parsing stored array for key ${propertyKey}: ${e}.`);
+    }
+  }
+  return storedArray;
+}
+
+/**
+ * Helper to add a value to a stored array in PropertiesService with an optional limit.
+ */
+function addToStoredArray(propertyKey, value, limit) {
+  const properties = PropertiesService.getUserProperties();
+  let storedArray = getStoredArray(propertyKey);
+
+  if (!storedArray.includes(value)) {
+    storedArray.push(value);
+    if (limit && storedArray.length > limit) {
+      storedArray = storedArray.slice(storedArray.length - limit);
+    }
+    try {
+      properties.setProperty(propertyKey, JSON.stringify(storedArray));
+      Logger.log(`Stored ${value} in ${propertyKey}. Total stored: ${storedArray.length}`);
+    } catch (e) {
+      Logger.log(`Error storing data to ${propertyKey}: ${e}. Consider Spreadsheet storage if exceeding quotas.`);
+    }
+  }
+}
+
+/**
  * Retrieves set of previously attempted codes from storage.
  * @returns {Set<string>} - Codes not to attempt again.
  */
 function getPreviouslyRedeemedAndFailedCDKs() {
-  const properties = PropertiesService.getUserProperties();
-  const redeemedString = properties.getProperty(REDEEMED_CODES_PROPERTY_KEY);
-  let redeemed = [];
-  if (redeemedString) { try { redeemed = JSON.parse(redeemedString); if (!Array.isArray(redeemed)) redeemed = []; } catch (e) { Logger.log(`Error parsing redeemed codes property: ${e}.`); } }
-
-  const failedString = properties.getProperty(PERMANENTLY_FAILED_CODES_PROPERTY_KEY);
-  let failed = [];
-  if (failedString) { try { failed = JSON.parse(failedString); if (!Array.isArray(failed)) failed = []; } catch (e) { Logger.log(`Error parsing failed codes property: ${e}.`); } }
-
+  const redeemed = getStoredArray(REDEEMED_CODES_PROPERTY_KEY);
+  const failed = getStoredArray(PERMANENTLY_FAILED_CODES_PROPERTY_KEY);
   return new Set([...redeemed, ...failed]);
 }
 
@@ -335,20 +369,8 @@ function getPreviouslyRedeemedAndFailedCDKs() {
  * @param {string} cdk - Code to store.
  */
 function storeRedeemedCDK(cdk) {
-  const properties = PropertiesService.getUserProperties();
-  const redeemedString = properties.getProperty(REDEEMED_CODES_PROPERTY_KEY);
-  let redeemed = [];
-  if (redeemedString) { try { redeemed = JSON.parse(redeemedString); if (!Array.isArray(redeemed)) redeemed = []; } catch (e) { Logger.log(`Error parsing redeemed codes for writing: ${e}.`); } }
-
-  if (!redeemed.includes(cdk)) {
-    redeemed.push(cdk);
-    // Optional: Limit size if needed (PropertyService has limits)
-    // const MAX_STORED_CODES = 500; if (redeemed.length > MAX_STORED_CODES) { redeemed = redeemed.slice(redeemed.length - MAX_STORED_CODES); }
-    try {
-      properties.setProperty(REDEEMED_CODES_PROPERTY_KEY, JSON.stringify(redeemed));
-      Logger.log(`Stored successful code: ${cdk}. Total success stored: ${redeemed.length}`);
-    } catch(e) { Logger.log(`Error storing redeemed codes: ${e}. Consider Spreadsheet storage.`); }
-  }
+  const MAX_STORED_CODES = 500;
+  addToStoredArray(REDEEMED_CODES_PROPERTY_KEY, cdk, MAX_STORED_CODES);
 }
 
 /**
@@ -356,20 +378,8 @@ function storeRedeemedCDK(cdk) {
  * @param {string} cdk - Code to store.
  */
 function storePermanentlyFailedCDK(cdk) {
-    const properties = PropertiesService.getUserProperties();
-    const failedString = properties.getProperty(PERMANENTLY_FAILED_CODES_PROPERTY_KEY);
-    let failed = [];
-    if (failedString) { try { failed = JSON.parse(failedString); if (!Array.isArray(failed)) failed = []; } catch (e) { Logger.log(`Error parsing failed codes for writing: ${e}.`); } }
-
-    if (!failed.includes(cdk)) {
-        failed.push(cdk);
-        // Optional: Limit size if needed
-        // const MAX_STORED_FAILED_CODES = 1000; if (failed.length > MAX_STORED_FAILED_CODES) { failed = failed.slice(failed.length - MAX_STORED_FAILED_CODES); }
-        try {
-            properties.setProperty(PERMANENTLY_FAILED_CODES_PROPERTY_KEY, JSON.stringify(failed));
-            Logger.log(`Stored permanently failed code: ${cdk}. Total failed stored: ${failed.length}`);
-        } catch(e) { Logger.log(`Error storing permanently failed codes: ${e}. Consider Spreadsheet storage.`); }
-    }
+  const MAX_STORED_FAILED_CODES = 1000;
+  addToStoredArray(PERMANENTLY_FAILED_CODES_PROPERTY_KEY, cdk, MAX_STORED_FAILED_CODES);
 }
 
 
@@ -405,18 +415,13 @@ function resetAllAttemptedCodes() {
  */
 function viewStoredCodes() {
   Logger.log("--- Stored Codes in PropertiesService (Brown Dust 2) ---");
-  const properties = PropertiesService.getUserProperties();
 
-  const redeemedString = properties.getProperty(REDEEMED_CODES_PROPERTY_KEY);
-  let redeemed = [];
-  if (redeemedString) { try { redeemed = JSON.parse(redeemedString); if (!Array.isArray(redeemed)) redeemed = []; } catch (e) { Logger.log(`Error parsing stored redeemed codes: ${e}`); } }
+  const redeemed = getStoredArray(REDEEMED_CODES_PROPERTY_KEY);
   Logger.log(`Successfully redeemed codes (${redeemed.length}): ${redeemed.length > 50 ? redeemed.slice(0, 25).join(', ') + ', ... ' + redeemed.slice(-25).join(', ') : redeemed.join(', ')}`);
 
   Logger.log("---");
 
-  const failedString = properties.getProperty(PERMANENTLY_FAILED_CODES_PROPERTY_KEY);
-  let failed = [];
-  if (failedString) { try { failed = JSON.parse(failedString); if (!Array.isArray(failed)) failed = []; } catch (e) { Logger.log(`Error parsing stored failed codes: ${e}`); } }
+  const failed = getStoredArray(PERMANENTLY_FAILED_CODES_PROPERTY_KEY);
   Logger.log(`Permanently failed codes (${failed.length}): ${failed.length > 50 ? failed.slice(0, 25).join(', ') + ', ... ' + failed.slice(-25).join(', ') : failed.join(', ')}`);
 
   Logger.log("--- End of Stored Codes ---");
